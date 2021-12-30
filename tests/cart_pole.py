@@ -1,6 +1,6 @@
 import jax.numpy as np
 import jax
-from ddpy.plants import NonLinearModel
+from jax_ddp.plants import NonLinearModel
 
 
 class CartPole(NonLinearModel):

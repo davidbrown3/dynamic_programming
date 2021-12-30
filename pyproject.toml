@@ -1,5 +1,5 @@
 [tool.poetry]
-name = "ddpy"
+name = "jax_ddp"
 version = "0.1.0"
 description = ""
 authors = ["David Browne <davidbrowne@outlook.com>"]

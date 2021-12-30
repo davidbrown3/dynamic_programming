@@ -4,7 +4,7 @@ from collections import namedtuple
 import jax
 import jax.numpy as np
 
-from ddpy.solvers.cost_functions import quadratic_cost_function
+from jax_ddp.solvers.cost_functions import quadratic_cost_function
 
 states = [
     np.array([[-1.0], [0.0], [0.0], [0.0]]),
