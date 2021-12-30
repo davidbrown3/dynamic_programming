@@ -1,0 +1,22 @@
+[tool.poetry]
+name = "ddpy"
+version = "0.1.0"
+description = ""
+authors = ["David Browne <davidbrowne@outlook.com>"]
+
+[tool.poetry.dependencies]
+python = "^3.8.12,<3.10"
+jax = "*"
+jaxlib = "*"
+tqdm = "*"
+plotly = "^5.1.0"
+
+
+[tool.poetry.dev-dependencies]
+flake8 = "^3.9.2"
+autopep8 = "^1.5.7"
+ipykernel = "^6.0.3"
+nbformat = "^5.1.3"
+pytest = "^6.2.5"
+coverage = "^6.2"
+isort = "^5.10.1"
