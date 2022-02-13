@@ -8,7 +8,7 @@ config.update("jax_enable_x64", True)
 
 class DifferentialDynamicProgramming:
 
-    def __init__(self, plant, running_cost_function, terminal_cost_function, order=1, control_constraints=False, debug=False):
+    def __init__(self, plant, running_cost_function, terminal_cost_function, terminal_trigger_function=None, order=1, control_constraints=False, debug=False):
 
         self.debug = debug
         self.plant = plant
@@ -25,6 +25,7 @@ class DifferentialDynamicProgramming:
         # Dispatching
         if self.debug:
 
+            self._terminal_trigger_function = terminal_trigger_function
             self._forward_pass_inner = self.forward_pass_inner
             self._forward_pass_prescribed = self.forward_pass_prescribed
             self._forward_pass_prescribed_inner = self.forward_pass_prescribed_inner
@@ -46,6 +47,10 @@ class DifferentialDynamicProgramming:
                 self._backward_pass_loop = self.backward_pass_loop
                 self._backward_pass_loop_jit_inner = None
         else:
+            if terminal_trigger_function is not None:
+                self._terminal_trigger_function = jax.jit(terminal_trigger_function)
+            else:
+                self._terminal_trigger_function = None
             self._forward_pass_inner = jax.jit(self.forward_pass_inner)
             self._forward_pass_prescribed = jax.jit(self.forward_pass_prescribed)
             self._forward_pass_prescribed_inner = jax.jit(self.forward_pass_prescribed_inner)
@@ -109,14 +114,17 @@ class DifferentialDynamicProgramming:
         regularisation = self._regularisation
         regularisation_delta = self._regularisation_delta_min
 
-        cost = self._calculate_cost(xs, us)
+        cost = self._calculate_cost(xs, us, index_terminated=N_steps)
 
+        index_terminated = N_steps
         costs = []
         with tqdm.trange(iterations) as t:
             for _ in t:
+
                 while True:
+                    # TODO: Don't bother backward pass on indices after index_terminated
                     betas, alphas, bNotPositiveDefinite, dcost_expected_d_line_alpha, d2cost_expected_d_line_alpha_2 = \
-                        self._backward_pass(xs=xs, us=us, regularisation=regularisation)
+                        self._backward_pass(xs=xs, us=us, regularisation=regularisation, index_terminated=index_terminated)
 
                     if bNotPositiveDefinite:
                         regularisation, regularisation_delta = self.increase_regularisation(regularisation, regularisation_delta)
@@ -127,8 +135,16 @@ class DifferentialDynamicProgramming:
 
                 for i, line_alpha in enumerate(self._line_alpha):
                     dcost_expected = self.calculate_expected_dcost(line_alpha, dcost_expected_d_line_alpha, d2cost_expected_d_line_alpha_2)
-                    _xs, _us = self._forward_pass(xi=np.squeeze(states_initial), xs=xs, us=us, betas=betas, alphas=alphas, line_alpha=line_alpha)
-                    cost_new = self._calculate_cost(_xs, _us)
+                    _xs, _us = self._forward_pass(xi=np.squeeze(states_initial), xs=xs, us=us, betas=betas, alphas=alphas, line_alpha=line_alpha,
+                                                  index_terminated=index_terminated)
+
+                    if self._terminal_trigger_function is not None:
+                        # index_terminated = N_steps-10
+                        index_terminated = self._terminal_trigger_function(_xs)
+                    else:
+                        index_terminated = N_steps
+
+                    cost_new = self._calculate_cost(_xs, _us, index_terminated)
 
                     if (cost_new - cost) / dcost_expected >= 1e-1:
                         cost = cost_new
@@ -144,7 +160,8 @@ class DifferentialDynamicProgramming:
                     t.set_postfix(
                         cost=f'{cost: .3f}',
                         regularisation=f'{regularisation_success: .6f}',
-                        line_alpha=f'{line_alpha: .2f}'
+                        line_alpha=f'{line_alpha: .2f}',
+                        index_terminated=index_terminated
                     )
                 else:
                     break
@@ -156,16 +173,20 @@ class DifferentialDynamicProgramming:
     def calculate_expected_dcost(line_alpha, dcost_expected_d_line_alpha, d2cost_expected_d_line_alpha_2):
         return line_alpha * (dcost_expected_d_line_alpha + line_alpha * d2cost_expected_d_line_alpha_2)
 
-    def calculate_cost(self, xs, us):
+    def calculate_cost(self, xs, us, index_terminated):
+        # TODO: Don't count costs after index_terminated
         return np.sum(self.running_cost_function.calculate_cost_batch(xs, us)) + \
-            np.sum(self.terminal_cost_function.calculate_cost(xs[-1], us[-1]))
+            np.sum(self.terminal_cost_function.calculate_cost(xs[index_terminated], us[index_terminated]))
 
     def estimated_delta_cost_coefficients(self, alpha, Q_u, Q_uu):
         dcost_expected_d_line_alpha = np.matmul(Q_u, alpha)
         d2cost_expected_d_line_alpha_2 = 0.5 * np.matmul(alpha.T, np.matmul(Q_uu, alpha))
         return np.squeeze(dcost_expected_d_line_alpha), np.squeeze(d2cost_expected_d_line_alpha_2)
 
-    def backward_pass(self, xs, us, regularisation):
+    def backward_pass(self, xs, us, regularisation, index_terminated):
+
+        R_xx = self.terminal_cost_function.g_xx
+        R_x = self.terminal_cost_function.calculate_g_x(xs[index_terminated], us[index_terminated])
 
         xs = np.flip(xs, axis=0)
         us = np.flip(us, axis=0)
@@ -174,15 +195,13 @@ class DifferentialDynamicProgramming:
 
         g_xs = self.running_cost_function.calculate_g_x_batch(xs, us)
         g_us = self.running_cost_function.calculate_g_u_batch(xs, us)
-        R_xx = self.terminal_cost_function.g_xx
-        R_x = self.terminal_cost_function.calculate_g_x(xs[0], us[0])
 
         betas, alphas, bNotPositiveDefinite, expected_delta_cost_1st, expected_delta_cost_2nd = \
-            self._backward_pass_loop(xs, us, R_x, R_xx, T_xs, T_us, g_xs, g_us, regularisation)
+            self._backward_pass_loop(xs, us, R_x, R_xx, T_xs, T_us, g_xs, g_us, regularisation, index_terminated)
 
         return betas, alphas, bNotPositiveDefinite, expected_delta_cost_1st, expected_delta_cost_2nd
 
-    def backward_pass_loop(self, xs, us, R_x, R_xx, T_xs, T_us, g_xs, g_us, regularisation):
+    def backward_pass_loop(self, xs, us, R_x, R_xx, T_xs, T_us, g_xs, g_us, regularisation, index_terminated):
 
         if self.order == 2:
             T_hessians = self.plant.calculate_hessian_discrete_batch(xs, us)
@@ -198,7 +217,10 @@ class DifferentialDynamicProgramming:
         dcost_expected_d_line_alpha = 0.0
         d2cost_expected_d_line_alpha_2 = 0.0
 
-        for i in range(xs.shape[0]):
+        N_steps = xs.shape[0]
+
+        for i in range(N_steps-index_terminated, N_steps):
+            # for i in range(xs.shape[0]):
 
             if not bNotPositiveDefinite:
 
@@ -254,21 +276,23 @@ class DifferentialDynamicProgramming:
 
         return np.flip(betas, axis=0), np.flip(alphas, axis=0), bNotPositiveDefinite, dcost_expected_d_line_alpha, d2cost_expected_d_line_alpha_2
 
-    def backward_pass_loop_1st_jit(self, xs, us, R_x, R_xx, T_xs, T_us, g_xs, g_us, regularisation):
+    def backward_pass_loop_1st_jit(self, xs, us, R_x, R_xx, T_xs, T_us, g_xs, g_us, regularisation, index_terminated):
 
-        betas = np.empty([xs.shape[0], us.shape[1], xs.shape[1]])
-        alphas = np.empty([us.shape[0], us.shape[1]])
+        N_steps = xs.shape[0]
+        betas = np.empty([N_steps, us.shape[1], xs.shape[1]])
+        alphas = np.empty([N_steps, us.shape[1]])
         bNotPositiveDefinite = False
         dcost_expected_d_line_alpha = 0.0
         d2cost_expected_d_line_alpha_2 = 0.0
 
         data = (R_x, R_xx, T_xs, T_us, g_xs, g_us, betas, alphas, bNotPositiveDefinite, regularisation,
                 dcost_expected_d_line_alpha, d2cost_expected_d_line_alpha_2)
-        data = jax.lax.fori_loop(0, xs.shape[0], self._backward_pass_loop_jit_inner, data)
+        data = jax.lax.fori_loop(N_steps-index_terminated, N_steps, self._backward_pass_loop_jit_inner, data)
+        # data = jax.lax.fori_loop(0, xs.shape[0], self._backward_pass_loop_jit_inner, data)
 
         return np.flip(data[6], axis=0), np.flip(data[7], axis=0), data[8], data[10], data[11]
 
-    def backward_pass_loop_2nd_jit(self, xs, us, R_x, R_xx, T_xs, T_us, g_xs, g_us, regularisation):
+    def backward_pass_loop_2nd_jit(self, xs, us, R_x, R_xx, T_xs, T_us, g_xs, g_us, regularisation, index_terminated):
 
         T_hessians = self.plant.calculate_hessian_discrete_batch(xs, us)
         T_xxs = T_hessians[0][0]
@@ -276,15 +300,17 @@ class DifferentialDynamicProgramming:
         T_uxs = T_hessians[1][0]
         T_uus = T_hessians[1][1]
 
-        betas = np.empty([xs.shape[0], us.shape[1], xs.shape[1]])
-        alphas = np.empty([us.shape[0], us.shape[1]])
+        N_steps = xs.shape[0]
+        betas = np.empty([N_steps, us.shape[1], xs.shape[1]])
+        alphas = np.empty([N_steps, us.shape[1]])
         bNotPositiveDefinite = False
         dcost_expected_d_line_alpha = 0.0
         d2cost_expected_d_line_alpha_2 = 0.0
 
         data = (R_x, R_xx, T_xs, T_us, T_xxs, T_xus, T_uxs, T_uus, g_xs, g_us, betas, alphas, bNotPositiveDefinite,
                 regularisation, dcost_expected_d_line_alpha, d2cost_expected_d_line_alpha_2)
-        data = jax.lax.fori_loop(0, xs.shape[0], self._backward_pass_loop_jit_inner, data)
+        data = jax.lax.fori_loop(N_steps-index_terminated, N_steps, self._backward_pass_loop_jit_inner, data)
+        # data = jax.lax.fori_loop(0, N_steps, self._backward_pass_loop_jit_inner, data)
 
         return np.flip(data[10], axis=0), np.flip(data[11], axis=0), data[12], data[14], data[15]
 
@@ -379,7 +405,7 @@ class DifferentialDynamicProgramming:
         return (R_x, R_xx, T_xs, T_us, T_xxs, T_xus, T_uxs, T_uus, g_xs, g_us, betas, alphas, bNotPositiveDefinite, regularisation,
                 dcost_expected_d_line_alpha, d2cost_expected_d_line_alpha_2)
 
-    @ staticmethod
+    @staticmethod
     def calculate_R_partials(beta, alpha, Q_xx, Q_uu, Q_xu, Q_ux, Q_x, Q_u):
 
         R_xx = Q_xx + np.matmul(Q_xu, beta) + np.matmul(Q_xu, beta) + np.matmul(beta.T, np.matmul(Q_uu, beta))
@@ -387,7 +413,7 @@ class DifferentialDynamicProgramming:
 
         return R_x, R_xx
 
-    @ staticmethod
+    @staticmethod
     def calculate_Q_partials_1st(R_x, R_xx, T_x, T_u, g_x, g_u, g_xx, g_uu, g_xu, g_ux, regularisation):
 
         reg_states = regularisation * np.eye(len(R_xx))
@@ -404,7 +430,7 @@ class DifferentialDynamicProgramming:
 
         return Q_xx, Q_uu, Q_xu, Q_ux, Q_x, Q_u, Q_uu_reg, Q_ux_reg
 
-    @ staticmethod
+    @staticmethod
     def calculate_Q_partials_2nd(R_x, T_xx, T_xu, T_ux, T_uu):
 
         dQ_xx = np.tensordot(R_x, T_xx, 1)[0, :, :]
@@ -414,7 +440,7 @@ class DifferentialDynamicProgramming:
 
         return dQ_xx, dQ_uu, dQ_xu, dQ_ux
 
-    @ staticmethod
+    @staticmethod
     def calculate_control_gains(Q_ux, Q_uu, Q_u):
 
         beta = np.linalg.solve(-Q_uu, Q_ux)
@@ -456,21 +482,22 @@ class DifferentialDynamicProgramming:
 
         return (xs, us, x_)
 
-    def forward_pass(self, xi, xs, us, betas, alphas, line_alpha=1e-2):
-        x_ = xi
-        data = (xs, us, betas, alphas, x_, line_alpha)
+    def forward_pass(self, xi, xs, us, betas, alphas, index_terminated, line_alpha=1e-2):
+
+        data = (xs, us, betas, alphas, xi, line_alpha, index_terminated)
         data = jax.lax.fori_loop(0, xs.shape[0], self._forward_pass_inner, data)
 
         return data[0], data[1]
 
     def forward_pass_inner(self, i, data):
 
-        xs, us, betas, alphas, x_, line_alpha = data
+        xs, us, betas, alphas, x_, line_alpha, index_terminated = data
+        i_max = np.minimum(i, index_terminated)
         dx = x_ - xs[i]
         xs = jax.ops.index_update(xs, jax.ops.index[i, :], x_)
-        du = np.matmul(betas[i], dx) + line_alpha * alphas[i]
+        du = np.matmul(betas[i_max], dx) + line_alpha * alphas[i_max]
         u_ = us[i] + du
         us = jax.ops.index_update(us, jax.ops.index[i, :], u_)
         x_ = self.plant.step(x_, u_)
 
-        return (xs, us, betas, alphas, x_, line_alpha)
+        return (xs, us, betas, alphas, x_, line_alpha, index_terminated)
