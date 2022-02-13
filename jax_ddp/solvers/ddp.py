@@ -121,6 +121,7 @@ class DifferentialDynamicProgramming:
         with tqdm.trange(iterations) as t:
             for _ in t:
 
+                counter = 0
                 while True:
                     # TODO: Don't bother backward pass on indices after index_terminated
                     betas, alphas, bNotPositiveDefinite, dcost_expected_d_line_alpha, d2cost_expected_d_line_alpha_2 = \
@@ -128,6 +129,9 @@ class DifferentialDynamicProgramming:
 
                     if bNotPositiveDefinite:
                         regularisation, regularisation_delta = self.increase_regularisation(regularisation, regularisation_delta)
+                        counter += 1
+                    elif counter > 10:
+                        break
                     else:
                         regularisation_success = regularisation
                         regularisation, regularisation_delta = self.decrease_regularisation(regularisation, regularisation_delta)
@@ -139,12 +143,11 @@ class DifferentialDynamicProgramming:
                                                   index_terminated=index_terminated)
 
                     if self._terminal_trigger_function is not None:
-                        # index_terminated = N_steps-10
-                        index_terminated = self._terminal_trigger_function(_xs)
+                        _index_terminated = self._terminal_trigger_function(_xs)
                     else:
-                        index_terminated = N_steps
+                        _index_terminated = N_steps
 
-                    cost_new = self._calculate_cost(_xs, _us, index_terminated)
+                    cost_new = self._calculate_cost(_xs, _us, _index_terminated)
 
                     if (cost_new - cost) / dcost_expected >= 1e-1:
                         cost = cost_new
@@ -156,6 +159,7 @@ class DifferentialDynamicProgramming:
                 if bcost_reduction:
                     xs = _xs
                     us = _us
+                    index_terminated = _index_terminated
                     costs.append(cost)
                     t.set_postfix(
                         cost=f'{cost: .3f}',
@@ -166,7 +170,7 @@ class DifferentialDynamicProgramming:
                 else:
                     break
 
-        return xs, us, costs
+        return xs[:index_terminated], us[:index_terminated], costs
 
     @staticmethod
     @jax.jit
