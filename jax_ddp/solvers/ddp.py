@@ -121,7 +121,6 @@ class DifferentialDynamicProgramming:
         with tqdm.trange(iterations) as t:
             for _ in t:
 
-                counter = 0
                 while True:
                     # TODO: Don't bother backward pass on indices after index_terminated
                     betas, alphas, bNotPositiveDefinite, dcost_expected_d_line_alpha, d2cost_expected_d_line_alpha_2 = \
@@ -129,13 +128,16 @@ class DifferentialDynamicProgramming:
 
                     if bNotPositiveDefinite:
                         regularisation, regularisation_delta = self.increase_regularisation(regularisation, regularisation_delta)
-                        counter += 1
-                    elif counter > 10:
-                        break
                     else:
                         regularisation_success = regularisation
                         regularisation, regularisation_delta = self.decrease_regularisation(regularisation, regularisation_delta)
                         break
+
+                    if regularisation > 1e10:
+                        break
+
+                if regularisation > 1e10:
+                    break
 
                 for i, line_alpha in enumerate(self._line_alpha):
                     dcost_expected = self.calculate_expected_dcost(line_alpha, dcost_expected_d_line_alpha, d2cost_expected_d_line_alpha_2)
@@ -149,7 +151,8 @@ class DifferentialDynamicProgramming:
 
                     cost_new = self._calculate_cost(_xs, _us, _index_terminated)
 
-                    if (cost_new - cost) / dcost_expected >= 1e-1:
+                    cost_reduction_ratio = (cost_new - cost) / dcost_expected
+                    if cost_reduction_ratio >= 1e-1:
                         cost = cost_new
                         bcost_reduction = True
                         break
@@ -163,9 +166,10 @@ class DifferentialDynamicProgramming:
                     costs.append(cost)
                     t.set_postfix(
                         cost=f'{cost: .3f}',
-                        regularisation=f'{regularisation_success: .6f}',
-                        line_alpha=f'{line_alpha: .2f}',
-                        index_terminated=index_terminated
+                        rcost=f'{cost_reduction_ratio: .1f}',
+                        reg=f'{regularisation_success: .6f}',
+                        alpha=f'{line_alpha: .2f}',
+                        ix=index_terminated,
                     )
                 else:
                     break
